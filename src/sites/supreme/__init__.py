@@ -1,0 +1,1 @@
+"""Supreme catalog listing adapter."""

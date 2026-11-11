@@ -1,4 +1,4 @@
-"""One-shot, read-only Supreme product-listing monitor."""
+"""CLI entry point for the read-only retail monitor."""
 
 from __future__ import annotations
 
@@ -10,29 +10,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.core.monitor_engine import MonitorEngine
+from src.core.notifications import NotificationError, notifiers_from_environment
+from src.core.site_registry import SiteRegistry
+from src.core.storage import SQLiteStorage
+from src.shared.models import MonitorQuery, ProductFilter
+from src.sites.supreme.adapter import SiteDependencyError, SiteTimeoutError, SupremeSite
 
-BASE_URL = "https://www.supremenewyork.com"
-SHOP_PATH = "/shop/all/jackets"
+
 CONFIG_DEFAULTS = {
     "target_items": [],
-    "settings": {"headless": False},
+    "settings": {
+        "headless": False,
+        "database_path": "data/retail-monitor.sqlite3",
+    },
 }
 
 
 @dataclass(frozen=True)
-class TargetItem:
-    keywords: tuple[str, ...]
-    color: str
-
-
-@dataclass(frozen=True)
-class MonitorConfig:
-    target_items: tuple[TargetItem, ...]
+class AppConfig:
+    filters: tuple[ProductFilter, ...]
     headless: bool
-
-
-class MissingDependencyError(RuntimeError):
-    pass
+    database_path: Path
 
 
 def _write_default_config(path: Path) -> None:
@@ -47,15 +46,18 @@ def _write_default_config(path: Path) -> None:
         config_file.write("\n")
 
 
-def load_config(config_path: str | Path) -> MonitorConfig:
+def load_config(config_path: str | Path) -> AppConfig:
     path = Path(config_path)
     try:
         with path.open(encoding="utf-8") as config_file:
             data: Any = json.load(config_file)
     except FileNotFoundError:
         _write_default_config(path)
-        with path.open(encoding="utf-8") as config_file:
-            data = json.load(config_file)
+        try:
+            with path.open(encoding="utf-8") as config_file:
+                data = json.load(config_file)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"Invalid generated configuration: {error}") from error
     except json.JSONDecodeError as error:
         raise ValueError(f"Invalid JSON in {path}: {error}") from error
 
@@ -74,17 +76,16 @@ def load_config(config_path: str | Path) -> MonitorConfig:
     if not isinstance(targets_data, list):
         raise ValueError("'target_items' must be a list.")
 
-    targets: list[TargetItem] = []
+    filters: list[ProductFilter] = []
     for index, target in enumerate(targets_data):
         if not isinstance(target, dict):
             raise ValueError(f"target_items[{index}] must be an object.")
-        unexpected_target_fields = set(target) - {"keywords", "color"}
-        if unexpected_target_fields:
+        unexpected_fields = set(target) - {"keywords", "color"}
+        if unexpected_fields:
             raise ValueError(
                 f"target_items[{index}] has unsupported field(s): "
-                f"{', '.join(sorted(unexpected_target_fields))}."
+                f"{', '.join(sorted(unexpected_fields))}."
             )
-
         keywords = target.get("keywords")
         color = target.get("color")
         if (
@@ -97,9 +98,8 @@ def load_config(config_path: str | Path) -> MonitorConfig:
             )
         if not isinstance(color, str) or not color.strip():
             raise ValueError(f"target_items[{index}].color must be a non-empty string.")
-
-        targets.append(
-            TargetItem(
+        filters.append(
+            ProductFilter(
                 keywords=tuple(word.strip() for word in keywords),
                 color=color.strip(),
             )
@@ -108,107 +108,25 @@ def load_config(config_path: str | Path) -> MonitorConfig:
     settings = data.get("settings")
     if not isinstance(settings, dict):
         raise ValueError("'settings' must be an object.")
-    unexpected_settings = set(settings) - {"headless"}
+    unexpected_settings = set(settings) - {"headless", "database_path"}
     if unexpected_settings:
         raise ValueError(
             "Unsupported setting(s): "
-            f"{', '.join(sorted(unexpected_settings))}. Only 'headless' is supported."
+            f"{', '.join(sorted(unexpected_settings))}."
         )
+
     headless = settings.get("headless", False)
     if not isinstance(headless, bool):
         raise ValueError("'settings.headless' must be true or false.")
+    database_path = settings.get("database_path", CONFIG_DEFAULTS["settings"]["database_path"])
+    if not isinstance(database_path, str) or not database_path.strip():
+        raise ValueError("'settings.database_path' must be a non-empty path.")
 
-    return MonitorConfig(target_items=tuple(targets), headless=headless)
-
-
-def matches_target(name: str, color: str, target: TargetItem) -> bool:
-    normalized_name = name.casefold()
-    normalized_color = color.casefold()
-    return all(word.casefold() in normalized_name for word in target.keywords) and (
-        target.color.casefold() in normalized_color
+    return AppConfig(
+        filters=tuple(filters),
+        headless=headless,
+        database_path=Path(database_path),
     )
-
-
-class SupremeMonitor:
-    def __init__(self, config: MonitorConfig) -> None:
-        self.config = config
-        self.logger = logging.getLogger("supreme-monitor")
-
-    def _create_driver(self, webdriver: Any, options_type: Any) -> Any:
-        options = options_type()
-        if self.config.headless:
-            options.add_argument("--headless=new")
-        driver = webdriver.Chrome(options=options)
-        driver.set_page_load_timeout(30)
-        return driver
-
-    def run(self) -> int:
-        if not self.config.target_items:
-            self.logger.error(
-                "No target_items configured. Edit config.json and run again."
-            )
-            return 2
-
-        try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-            from selenium.common.exceptions import (
-                NoSuchElementException,
-                TimeoutException,
-            )
-            from selenium.webdriver.common.by import By
-            from selenium.webdriver.support import expected_conditions as expected
-            from selenium.webdriver.support.ui import WebDriverWait
-        except ModuleNotFoundError as error:
-            raise MissingDependencyError(
-                "Selenium is required. Install project dependencies with "
-                "'python -m pip install -r requirements.txt'."
-            ) from error
-
-        driver = None
-        try:
-            driver = self._create_driver(webdriver, Options)
-            try:
-                driver.get(BASE_URL + SHOP_PATH)
-                WebDriverWait(driver, 20).until(
-                    expected.presence_of_element_located(
-                        (By.CLASS_NAME, "inner-article")
-                    )
-                )
-            except TimeoutException:
-                self.logger.warning("The shop page or listings timed out.")
-                return 1
-
-            cards = driver.find_elements(By.CLASS_NAME, "inner-article")
-            matches = 0
-            for card in cards:
-                try:
-                    name = card.find_element(By.CLASS_NAME, "name").text.strip()
-                    color = card.find_element(By.CLASS_NAME, "style").text.strip()
-                    link = card.find_element(By.TAG_NAME, "a").get_attribute("href")
-                except NoSuchElementException:
-                    self.logger.debug("Skipping a listing with missing fields.")
-                    continue
-
-                if not link:
-                    continue
-                for target in self.config.target_items:
-                    if matches_target(name, color, target):
-                        matches += 1
-                        self.logger.info(
-                            "Match: %s (%s) — open the listing to verify availability "
-                            "and variant: %s",
-                            name,
-                            color,
-                            link,
-                        )
-
-            if matches == 0:
-                self.logger.info("No configured product listings matched.")
-            return 0
-        finally:
-            if driver is not None:
-                driver.quit()
 
 
 def main() -> int:
@@ -216,25 +134,60 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    logger = logging.getLogger("retail-monitor")
     config_path = Path("config.json")
     config_existed = config_path.exists()
     try:
         config = load_config(config_path)
     except (OSError, ValueError) as error:
-        logging.getLogger("supreme-monitor").error("%s", error)
+        logger.error("%s", error)
         return 2
 
     if not config_existed:
-        logging.getLogger("supreme-monitor").info(
-            "Created %s with safe defaults; add targets before running.", config_path
+        logger.info(
+            "Created %s with safe defaults; add target_items before scanning.",
+            config_path,
         )
         return 0
+    if not config.filters:
+        logger.error("No target_items configured. Edit config.json and run again.")
+        return 2
 
     try:
-        return SupremeMonitor(config).run()
-    except MissingDependencyError as error:
-        logging.getLogger("supreme-monitor").error("%s", error)
+        notifications = notifiers_from_environment()
+    except ValueError as error:
+        logger.error("%s", error)
         return 2
+
+    registry = SiteRegistry()
+    registry.register(SupremeSite(headless=config.headless))
+    engine = MonitorEngine(
+        registry,
+        SQLiteStorage(config.database_path),
+        notifications=notifications,
+    )
+
+    try:
+        summary = engine.scan_once(MonitorQuery(filters=config.filters))
+    except SiteTimeoutError as error:
+        logger.error("%s", error)
+        return 1
+    except SiteDependencyError as error:
+        logger.error("%s", error)
+        return 2
+    except NotificationError as error:
+        logger.error("Notification delivery failed; events remain queued: %s", error)
+        return 1
+
+    logger.info(
+        "Scan complete: %d site(s), %d product observation(s), %d new event(s), "
+        "%d event notification(s) delivered.",
+        summary.sites_scanned,
+        summary.products_observed,
+        summary.events_created,
+        summary.notifications_delivered,
+    )
+    return 0
 
 
 if __name__ == "__main__":

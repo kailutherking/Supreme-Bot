@@ -1,10 +1,12 @@
 import json
+import os
 import stat
 import tempfile
 import unittest
 from pathlib import Path
 
-from supremebot import TargetItem, load_config, matches_target
+from src.shared.models import ProductFilter, ProductObservation
+from supremebot import load_config, main
 
 
 class LoadConfigTests(unittest.TestCase):
@@ -14,11 +16,20 @@ class LoadConfigTests(unittest.TestCase):
 
             config = load_config(config_path)
 
-            self.assertEqual(config.target_items, ())
+            self.assertEqual(config.filters, ())
             self.assertFalse(config.headless)
             self.assertEqual(
+                config.database_path, Path("data/retail-monitor.sqlite3")
+            )
+            self.assertEqual(
                 json.loads(config_path.read_text(encoding="utf-8")),
-                {"target_items": [], "settings": {"headless": False}},
+                {
+                    "target_items": [],
+                    "settings": {
+                        "headless": False,
+                        "database_path": "data/retail-monitor.sqlite3",
+                    },
+                },
             )
             self.assertEqual(stat.S_IMODE(config_path.stat().st_mode) & 0o077, 0)
 
@@ -66,11 +77,51 @@ class LoadConfigTests(unittest.TestCase):
 
 class MatchTargetTests(unittest.TestCase):
     def test_matches_all_keywords_and_color_case_insensitively(self):
-        target = TargetItem(keywords=("Faux", "Jacket"), color="Red")
+        target = ProductFilter(keywords=("Faux", "Jacket"), color="Red")
+        product = ProductObservation(
+            site_id="example",
+            product_id="sku-1",
+            title="Faux Fur Jacket",
+            color="Bright Red",
+            url="https://shop.example/products/sku-1",
+        )
 
-        self.assertTrue(matches_target("Faux Fur Jacket", "Bright Red", target))
-        self.assertFalse(matches_target("Faux Fur Coat", "Bright Red", target))
-        self.assertFalse(matches_target("Faux Fur Jacket", "Blue", target))
+        self.assertTrue(target.matches(product))
+        self.assertFalse(
+            target.matches(
+                ProductObservation(
+                    site_id="example",
+                    product_id="sku-2",
+                    title="Faux Fur Coat",
+                    color="Bright Red",
+                    url="https://shop.example/products/sku-2",
+                )
+            )
+        )
+        self.assertFalse(
+            target.matches(
+                ProductObservation(
+                    site_id="example",
+                    product_id="sku-3",
+                    title="Faux Fur Jacket",
+                    color="Blue",
+                    url="https://shop.example/products/sku-3",
+                )
+            )
+        )
+
+
+class CliTests(unittest.TestCase):
+    def test_first_run_writes_config_without_starting_browser(self):
+        original_directory = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                self.assertEqual(main(), 0)
+                self.assertTrue(Path("config.json").exists())
+                self.assertFalse(Path("data/retail-monitor.sqlite3").exists())
+            finally:
+                os.chdir(original_directory)
 
 
 if __name__ == "__main__":

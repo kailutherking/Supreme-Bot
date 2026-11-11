@@ -5,11 +5,34 @@ and do not imply that unimplemented platform features are available.
 
 ## Unreleased
 
+### Added
+
+- Added a reusable retail-site registry, query/observation models, monitor
+  engine, bounded authorized HTTPS JSON client, and Supreme site adapter.
+- Added SQLite product snapshots, observation history, change events, basic
+  analytics, and a pending-notification outbox.
+- Added opt-in Discord webhook, Telegram, and SMTP email notification sinks.
+- Added monitoring, storage, request, and notification integration tests.
+
+### Changed
+
+- Expanded the Supreme scan from `/shop/all/jackets` to `/shop/all/`, preserving
+  the local working-tree update.
+- Added the local SQLite database path to generated configuration.
+- Reworked the README to document the plugin architecture, persistence,
+  notification environment variables, and current limitations.
+
+### Not included
+
+- No additional retailer adapter is active; retailer-specific data sources
+  require authorization and contract-level review.
+- No React UI, authentication, web API, scheduler, PostgreSQL, or Redis service
+  has been added.
+
 ### Documentation
 
-- Added project setup, configuration, usage, environment, deployment, and
-  limitation details to the README.
-- Added this changelog to track shipped changes.
+- The architecture audit and multi-site roadmap are maintained in
+  [docs/AUDIT.md](docs/AUDIT.md).
 
 ## 2026-11-11 — `1a3c7be`
 

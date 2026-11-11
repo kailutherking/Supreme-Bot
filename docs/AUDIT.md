@@ -1,334 +1,352 @@
-# Supreme Bot: codebase audit and safe modernization plan
+# Retail Monitor: repository audit and evolution roadmap
 
 **Audit date:** 2026-11-11
-**Scope:** All tracked repository files on `main` at the audit baseline. At that point, only [`supremebot.py`](../supremebot.py) was tracked; the audit identified no dependency manifest, tests, configuration templates, services, or UI. The baseline source compiled successfully with `python3 -m py_compile supremebot.py`. Pylance initially reported unresolved imports for `requests`, `selenium`, and `webdriver_manager`, plus unused imports for `requests` and `os`.
-
-## Remediation update
-
-The findings and scores below describe the initial source snapshot before remediation. The runtime has since been reduced to a one-shot, read-only listing monitor:
-
-- Removed cart, checkout, payment-form, and automatic order-submission code; removed browser fingerprint/anti-detection modifications and human-mimic delays.
-- Replaced the billing/proxy/checkout configuration with validated monitoring-only settings. New config files are created with owner-only permissions; legacy payment and checkout fields are rejected.
-- Removed the size fallback behavior by no longer selecting or purchasing variants. A listing match is only a discovery; the user must open the retailer page and verify availability and variant.
-- Added guaranteed driver cleanup with `finally`, clear malformed-config errors, focused tests, and a Selenium dependency declaration.
-- The monitor remains Supreme-only and depends on the retailer's listing markup. Selenium 4.52.0 is pinned and installed in the selected Pylance environment; diagnostics are clean. No live retailer/browser integration test was run.
-- Multi-site connectors, task queues, database, notifications, and dashboards remain unimplemented because no authorized retailer data sources or access agreements are specified.
+**Scope:** All repository code, tests, configuration, and documentation in the current worktree. The local Supreme path change to `/shop/all/` is included and preserved.
 
 ## Executive summary
 
-The initial source was a single-process Selenium script that combined configuration creation, browser startup, product matching, cart operations, payment-form entry, order submission, logging, and teardown in one `SupremeBot` class. It has been reduced to a one-shot, read-only Supreme listing monitor. Most platform capabilities (accounts, tasks, monitoring loops, notifications, analytics, persistence, APIs, and site adapters) still do not exist.
+The project has moved from a single Supreme-specific script to a small,
+read-only monitoring foundation. It now has typed product and query models, a
+retailer plugin registry, a synchronous monitor engine, SQLite history and
+change-event storage, a pending-notification outbox, an allowlisted HTTPS JSON
+client, and Discord, Telegram, email, and console notification sinks.
 
-The most important remaining blockers are the single-site implementation, unavailable retailer-authorized data-source integration, no validated dependency lock, and no UI, storage, notifications, or metrics. The audit findings and scorecard below preserve the baseline assessment so the original risks and requested roadmap remain traceable.
+Only the Supreme adapter is active. It uses Selenium to scan
+`https://www.supremenewyork.com/shop/all/` once and emits product title, color,
+URL, and an image URL when present. It does not derive price, availability,
+release time, or variant data from the current page; those fields remain
+unknown. Other stores are not implemented because no authorized source/API or
+integration contract is identified for them.
 
-This audit does **not** implement or recommend scaling automated checkout, CAPTCHA solving/bypass, proxy rotation for evading retailer controls, or browser fingerprint concealment. A responsible platform direction is limited to documented, authorized product feeds/APIs, conservative rate limits, clear stop conditions, and user-directed checkout on the retailer's own site.
+There is no checkout, account, payment, authentication, web API, dashboard,
+scheduler, or worker queue.
 
-## 1. Critical problems
-
-| Finding | Evidence | Impact |
-|---|---|---|
-| Payment and personal data are modeled as ordinary JSON configuration | `load_config()` creates `billing_info`; `fill_checkout_form()` reads name, address, phone, card number, expiry, and CVV (`supremebot.py:32-72, 245-300`) | A real config can expose highly sensitive data through plaintext files, backups, sync, or accidental sharing. The defaults are examples, not evidence that real credentials are present. |
-| Browser anti-detection behavior is explicitly configured | Chrome automation flag suppression, a fixed user agent, and a `navigator.webdriver` override (`supremebot.py:80-99`) | Evades retailer bot controls and creates brittle, policy-sensitive behavior. Remove rather than generalize this behavior. |
-| Generated configuration enables automatic checkout | `auto_checkout` defaults to `True`; `submit_order()` clicks the final button when enabled (`supremebot.py:68-72, 303-331`) | Unattended purchases can occur. The code does not perform an explicit human confirmation at the point of purchase. |
-| Success is reported without verifying order acceptance | `submit_order()` returns success immediately after `.click()`; `run()` then logs “Checkout completed successfully” (`supremebot.py:303-331, 333-382`) | Rejections, payment failures, unavailable inventory, or a stale page can be misreported as successful orders. |
-
-## 2. High-priority fixes
-
-1. **Stop collecting payment data.** Do not store card numbers/CVV in app configuration or logs. For an authorized commerce workflow, use the retailer's hosted checkout and have the user complete payment there.
-2. **Remove anti-detection code.** Do not disguise automation or alter browser fingerprints. Use official documented interfaces and honor their published policies and limits.
-3. **Make actions explicit and user-driven.** Replace automatic order submission with a safe handoff; do not make automated purchase submission a configurable default.
-4. **Validate configuration at startup.** `load_config()` only handles `FileNotFoundError`; malformed JSON, missing keys, wrong types, and invalid delay ranges can raise uncaught exceptions or fail later with `KeyError`.
-5. **Guarantee cleanup.** `driver.quit()` is reached only on the normal path. An exception in startup/run or a blocked `input()` can leave the browser process open. Use a lifecycle boundary that always closes owned resources.
-6. **Use structured logging and explicit outcomes.** Distinguish discovery, timeout, user handoff, and verified result. Avoid saying that an order succeeded unless an authoritative confirmation was observed.
-7. **Declare and lock dependencies.** There is no manifest or lockfile. Runtime ChromeDriver installation is implicit and can fail or change independently. The current editor environment cannot resolve Selenium or webdriver-manager imports.
-
-## 3. Current architecture and feature inventory
-
-| Area | Observed implementation | Status / gap |
-|---|---|---|
-| Project structure | One tracked Python file | No package boundaries, tests, CI, docs beyond console instructions, or configuration schema |
-| Retailer support | Supreme URL and selectors are embedded in `SupremeBot` | No plugin boundary; every other requested retailer is unsupported |
-| Product monitoring | Opens `/shop/all/jackets`, waits for `.inner-article`, scans current page | One-shot page scan; no schedule, restock/keyword/variant/feed/API/sitemap/collection monitoring or deduplication |
-| Checkout | Selenium cart, billing/payment form fill, submit | Tightly coupled to one page flow; brittle selectors; no safe orchestration, state machine, or confirmation verification |
-| Browser/session | New Chrome driver in setup; no cookie/session persistence | No pooling, lifecycle manager, session abstraction, or resource budgeting |
-| Accounts/profiles | None | Billing data is embedded in a generic config object; no account or profile model |
-| CAPTCHA/challenges | None | No challenge detection or safe user handoff |
-| Proxies | `proxies: []` configuration field | No proxy implementation, validation, health, stickiness, or use |
-| Notifications | Console and timestamped text file only | No Discord, Telegram, email, or SMS integration |
-| Storage | JSON config and append-only text log | No task, event, result, or analytics store |
-| Analytics | None | No counters, latency, conversion, or monitoring metrics |
-| Task engine/API/UI | A synchronous `run()` loop | No task lifecycle, queue, cancellation, concurrency limits, API, or dashboard |
-
-## 4. Scalability problems
-
-- One browser is created for the process; work is sequential and has no independent task model.
-- The site, selectors, data model, and checkout assumptions are hard-coded into a single class.
-- There is no work queue, concurrency limit, backpressure, deduplication, or multi-worker coordination.
-- There is no durable task state or event history; a restart loses progress.
-- A Selenium browser per monitoring job would be expensive and unnecessary for documented feed/API integrations.
-- There are no retailer-specific policy/rate-limit settings or per-source circuit breakers.
-
-**Recommendation:** begin with a single-process, read-only monitoring service using authorized sources. Add persistence and a queue only when measured load and permitted access require them. Do not equate retailer count with permission to poll or automate each site.
-
-## 5. Security and privacy review
-
-- **Secrets and PCI scope:** generated config includes card-number and CVV fields and a sample-like value. Do not put real payment credentials in JSON, source control, logs, or analytics. Prefer retailer-hosted checkout and minimize the app's sensitive-data footprint.
-- **Personal data:** name, email, phone, and address fields are collected. No retention policy, encryption-at-rest strategy, access controls, or deletion workflow exists.
-- **Automation evasion:** fingerprint changes and stealth options should be removed. They are unnecessary for authorized feed access and undermine transparency.
-- **Supply chain:** no pinned dependencies, lockfile, integrity policy, or vulnerability update process. `webdriver_manager` downloads a driver at runtime.
-- **Configuration trust:** config is loaded without schema validation or restrictive file permissions.
-- **Error visibility:** broad page-flow assumptions and incomplete exception coverage can hide failures; no redaction policy is defined.
-- **Logging:** current messages do not intentionally log card fields, but free-form messages and future changes have no redaction boundary.
-- **Exposure assessment:** no server, network listener, database, or API is present in the repository. This is a source review, not a penetration test or a claim that external services are secure.
-
-## 6. Reliability risks
-
-- `select_size()` silently chooses the first non-placeholder size when the requested size is absent (`supremebot.py:162-191`), which can lead to the wrong item variant.
-- `select_size()` treats some missing-size conditions as success, so downstream steps may proceed on an unverified assumption.
-- Fixed page selectors and assumptions about Supreme's current DOM can become stale without detection.
-- The script does not check inventory or cart state with a durable source of truth after each transition.
-- Most failures are converted to `False`; unexpected exceptions can bypass cleanup and lose useful context.
-- The `run()` loop has no cancellation, bounded retry policy, or persisted checkpoint. It also processes target items serially.
-- `add_random_delay()` sleeps twice, including a fixed 2–5 second delay regardless of the configured range (`supremebot.py:114-120`), making timing hard to reason about and tests slow.
-- `input()` prevents unattended shutdown in non-headless mode and can hang in non-interactive environments.
-
-## 7. Performance report
-
-No measured benchmark or profile exists, so performance conclusions are source-based rather than workload measurements.
-
-- Browser startup and page rendering dominate the current Selenium flow; an official feed/API is a better fit for read-only monitoring where available.
-- The flow uses fixed waits and extra sleeps rather than measuring latency or using a schedule with backoff.
-- No request cache, conditional fetch, result deduplication, or telemetry prevents repeated work.
-- There is no queue or concurrency control; naïvely adding parallel browsers would multiply memory/CPU use and site load.
-- `requests` is imported but unused; `os` is unused. Selenium and webdriver-manager imports are unresolved in the selected Pylance environment.
-- No memory leak is proven by this source alone; the concrete resource-lifecycle defect is the lack of guaranteed driver shutdown on exceptional exits.
-
-**Measure before optimizing:** discovery latency by source, request count, timeout rate, worker memory, queue age, duplicate event rate, and shutdown completion. Use a staging/mock source rather than load-testing retailer endpoints.
-
-## 8. Competitive feature-gap analysis
-
-The listed products—**Wrath, Valor, MekAIO, Kodai, Cyber, Prism, Ganesh, Stellar, NSB, Balko, WhatBot, Hayha, Torpedo, Phantom, TSB, and AIOMoji**—are proprietary products. This repository contains no competitor research, and this audit did not verify current vendor features or internal architecture. It would be misleading to attribute specific capabilities or implementation choices to each product without current, attributable product documentation.
-
-The defensible comparison is therefore a **capability gap against the market category**, not a vendor-by-vendor feature claim:
-
-| Capability commonly expected from a mature multi-site product | This repository |
-|---|---|
-| Multi-site adapter registry and site-specific configuration | Absent; Supreme-specific constants/selectors |
-| Task UI, scheduling, pause/cancel, and task state | Absent; one synchronous entry point |
-| Monitoring event stream, deduplication, and restock history | Absent |
-| Account/profile management | Absent; raw billing fields are placed in config |
-| Proxy pools and challenge-solving | Not implemented; field placeholder only. This audit does not recommend evasion, proxy rotation, or CAPTCHA solving. |
-| Notifications and task reporting | Absent; console/file output |
-| Durable analytics and operational dashboards | Absent |
-| Recovery, retry budgets, and meaningful error taxonomy | Absent |
-| Supported/versioned integrations and policy-aware rate limits | Absent |
-
-**High-level patterns worth adopting safely:** adapter isolation, explicit task lifecycle/state transitions, bounded queues, durable event records, idempotent result processing, source-specific rate limits, health/latency metrics, user-facing errors, and opt-in notifications. These are general software architecture recommendations, not claims about any named vendor's internals. A genuine vendor comparison should use each product's current official public materials and clearly label promotional claims versus independently verified behavior.
-
-## 9. Recommended multi-site architecture
-
-Treat each retailer as an independently versioned adapter over an **authorized, documented, read-only source** (official API, licensed feed, or other explicitly permitted integration). Avoid assuming that a listed store offers such an interface. A site with no permitted source should remain unsupported rather than being automated through evasive browser behavior.
+## Repository structure
 
 ```text
-                  +------------------------------+
-                  | UI / CLI (task configuration)|
-                  +---------------+--------------+
-                                  |
-                  +---------------v--------------+
-                  | Task API + lifecycle manager |
-                  +---------------+--------------+
-                                  |
-                  +---------------v--------------+
-                  | Scheduler / bounded queue    |
-                  +---------------+--------------+
-                                  |
-             +--------------------v--------------------+
-             | Monitoring engine: normalize, dedupe,   |
-             | rate-limit, emit events, stop on policy |
-             +--------------------+--------------------+
-                                  |
-                    +-------------v-------------+
-                    | RetailSite adapter        |
-                    | documented source only    |
-                    +-------------+-------------+
-                                  |
-                          Authorized feed/API
-
-       events -> storage / metrics / notifications
-       user -> retailer checkout (manual handoff; outside the bot)
+.
+├── .gitignore
+├── CHANGELOG.md
+├── README.md
+├── requirements.txt
+├── supremebot.py                 # CLI, config parsing, composition root
+├── docs/
+│   └── AUDIT.md
+├── src/
+│   ├── core/
+│   │   ├── monitor_engine.py     # one scan, normalize, persist, notify
+│   │   ├── notifications.py     # logging, Discord, Telegram, SMTP
+│   │   ├── request_engine.py    # allowlisted HTTPS JSON client
+│   │   ├── site_registry.py     # RetailSite protocol and registry
+│   │   └── storage.py           # SQLite products/history/events/outbox
+│   ├── shared/
+│   │   └── models.py            # observations, filters, events, summaries
+│   └── sites/
+│       └── supreme/
+│           └── adapter.py       # Supreme URL, Selenium, selectors, parsing
+└── tests/
+    ├── test_integrations.py
+    ├── test_monitoring.py
+    └── test_supremebot.py
 ```
 
-### Example target layout
+`.gitignore` excludes local configuration, the SQLite data directory, virtual
+environments, and Python bytecode. `requirements.txt` pins Selenium 4.52.0;
+all other runtime components use the Python standard library.
+
+## Current architecture and data flow
+
+```text
+supremebot.py
+  ├─ reads config.json and target filters
+  ├─ registers enabled plugins (currently Supreme only)
+  └─ constructs MonitorEngine
+       ├─ SupremeSite -> Selenium -> one Supreme listing page
+       ├─ applies shared query filters
+       ├─ SQLiteStorage
+       │    ├─ latest products
+       │    ├─ every accepted observation
+       │    ├─ derived change events
+       │    └─ pending notification outbox
+       └─ NotificationDispatcher
+            ├─ console logging
+            ├─ Discord webhook (opt-in)
+            ├─ Telegram bot API (opt-in)
+            └─ SMTP email (opt-in)
+```
+
+The `RetailSite` protocol accepts a `MonitorQuery` and returns normalized
+`ProductObservation` values. The engine validates plugin/site identity,
+applies filters, stores history and change events, then delivers pending
+notifications. The core is synchronous and the CLI executes one scan per
+invocation.
+
+## Current capabilities
+
+| Area | Implemented behavior | Boundary |
+|---|---|---|
+| Product discovery | Supreme listing page scanned once | Requires Selenium, Chrome, and current page selectors |
+| Keyword/color monitoring | Shared filter model; multiple target rules are ORed, words within a rule are ANDed | CLI config currently supports keywords and color only |
+| Collection monitoring | `collection_id` exists in shared query and product models | No active adapter or CLI configuration supplies collection data |
+| Variants | Variant ID is part of the stored identity; new variants create events | Supreme adapter does not provide variant IDs |
+| Inventory/restock | SQLite emits restock when a known `false` availability becomes `true` | Supreme adapter reports availability as unknown, so it emits no restocks |
+| Price/release changes | SQLite records and detects changes when an adapter supplies those fields | Supreme adapter currently supplies neither |
+| History | SQLite stores every accepted observation and event | No retention/compaction policy or migration framework |
+| Analytics | Basic product, observation, restock, and pending-event counts | No time-series queries, CLI report, dashboard, or latency metrics |
+| Notifications | Console, Discord, Telegram, SMTP email | Provider setup is environment-based; no SMS, user preferences, or per-channel delivery receipts |
+| Request layer | HTTPS JSON client enforces exact allowed hosts, request spacing, timeout, response size, and no redirects | No current site adapter calls it; it has no cache or retry policy |
+
+### Repository audit details
+
+- **API usage:** No external retailer API is currently called. The Supreme
+  adapter uses Selenium and DOM selectors. `AuthorizedJsonClient` is a guarded
+  foundation for a future documented, authorized API/feed plugin.
+- **Dependencies:** Selenium 4.52.0 is the only declared dependency. There is
+  no complete transitive lockfile, package metadata, CI workflow, or automated
+  dependency vulnerability scan.
+- **Configuration:** `config.json` is created in the working directory with
+  target keywords, color, headless mode, and a SQLite path. Unsupported fields
+  such as credentials and checkout settings are rejected. Notification
+  credentials are read from environment variables.
+- **Logging:** Python's standard `logging` module writes to stdout. Product
+  events are sent through the logging notifier; provider errors are reported
+  without including webhook/token values.
+- **Output formats:** Human-readable console logs; SQLite tables for
+  normalized products, observations, events, and delivery status. There is no
+  JSON/CSV export or HTTP API.
+- **Tests:** Unit/integration tests cover config validation, filters, SQLite
+  history/change detection, the monitor engine, request restrictions, and
+  mocked Discord/Telegram/email behavior. They do not launch a browser, contact
+  a retailer, or send real notifications.
+- **Security/data:** The database contains product metadata only. Config file
+  defaults are owner-only on POSIX. Notification secrets must not be committed
+  or logged. The application stores no payment or customer data.
+
+## What works well
+
+- Site-specific browser and DOM logic is isolated from shared filtering,
+  storage, and notification code.
+- Product and event types are explicit, and the engine checks the site ID
+  returned by each plugin.
+- SQLite persistence distinguishes current product state from observation
+  history and derived events.
+- Notification events are persisted before delivery. A failed delivery leaves
+  the event pending for a later scan rather than silently discarding it.
+- The JSON request client is restricted to HTTPS and an explicit host allowlist,
+  with a configurable interval, timeout, response-size cap, and redirects
+  disabled.
+- Credentials are opt-in through environment variables; outgoing notification
+  content is limited to product information.
+- Tests use local databases and mocked transports, avoiding uncontrolled
+  network or retailer activity.
+
+## Technical debt, reliability, and scalability limits
+
+1. **Single retailer and brittle selectors.** Supreme is the only active
+   adapter. CSS class names and listing structure can change without notice.
+   The integration has not been tested against a live page.
+2. **No verified inventory signal.** Presence on the listing page is not proof
+   of availability. The adapter correctly records availability as unknown;
+   restock metrics will remain empty until a permitted source reports stock.
+3. **One-shot execution.** There is no scheduler, task lifecycle, cancellation,
+   backpressure, concurrency limit, or worker health check.
+4. **SQLite is single-host storage.** WAL and a busy timeout help local use but
+   do not make SQLite a multi-host database. There is no schema versioning,
+   retention job, backup/restore test, or operational migration path.
+5. **Notification outbox is at-least-once.** Events are marked delivered after
+   all configured sinks return successfully. If one sink succeeds and a later
+   sink fails, a subsequent run may deliver a duplicate to the successful
+   sink. There are no per-sink receipts or exponential retry schedule.
+6. **Metrics are minimal.** Counts exist, but there are no latency, queue age,
+   provider-delivery, source error-rate, or per-site budget metrics.
+7. **No deployment boundary.** The CLI is the only entry point. There is no
+   service API, authentication, dashboard, secrets manager, CI, or deployment
+   configuration.
+8. **Operational source policy is not yet a registry.** The request client
+   supports an exact host allowlist, but active plugins still need documented
+   source permissions, request budgets, attribution, and data-retention rules.
+
+No evidence of a memory leak or concurrency race was found in the current
+single-scan path. Browser cleanup is in `finally`; unexpected database and
+plugin errors remain visible rather than being converted to success-shaped
+results.
+
+## Retailer plugin architecture
+
+The protocol is deliberately small:
+
+```python
+class RetailSite(Protocol):
+    @property
+    def site_id(self) -> str: ...
+
+    def discover(
+        self, query: MonitorQuery
+    ) -> Iterable[ProductObservation]: ...
+```
+
+`src/sites/supreme/adapter.py` is the concrete example. A new plugin should
+normalize source records into `ProductObservation` and declare its source,
+permitted request budget, supported fields, and error behavior. Use
+`AuthorizedJsonClient` for documented, authorized HTTPS JSON sources; avoid
+browser automation when a supported feed/API exists. No adapter should infer
+availability from a product page being present.
+
+The following are planned plugin slots, **not implemented integrations**:
+Supreme, Kith, Nike, SNKRS, Adidas, Palace, Stussy, New Balance, Concepts,
+Bodega, Union, and Undefeated. Some brands/platforms may not expose an
+authorized source suitable for this monitor. Keep those sites disabled until
+their documented access and limits are reviewed.
+
+## Feature-gap analysis and competitor context
+
+Valor, Wrath, MekAIO, Kodai, Cyber, and Balko are proprietary products. This
+repository has no source-verified competitor research, so this report does
+not attribute specific features or internals to those vendors. The comparison
+below is against common retail-monitoring platform capabilities, not claims
+about any named product.
+
+| Capability area | Current project | Gap to a mature monitoring/intelligence service |
+|---|---|---|
+| Multi-site discovery | One Supreme listing adapter | Authorized adapter per retailer, source contracts, versioning, health checks |
+| Product/release discovery | One current listing scan | Feed/collection/keyword sources, scheduled discovery, release calendar and change history |
+| Restock and inventory intelligence | Event model supports known availability transitions | Reliable source signals, variant-level inventory, deduplication and time-window analytics |
+| Price intelligence | Price-change event and history fields | Currency normalization, price histories, alert thresholds and analytics queries |
+| Notifications | Discord, Telegram, email transports | Per-user routing/preferences, templates, retries, rate limits and delivery receipts |
+| Analytics | Basic aggregate counts | Time-series latency, discovery/restock rates, source health, error budgets and dashboards |
+| Operations | Synchronous local CLI | Durable jobs, cancellation, bounded queues, worker orchestration and service monitoring |
+| Storage | Local SQLite history | PostgreSQL-backed shared state, migrations, retention, backup/restore and tenant boundaries |
+
+## Recommended folder structure as the platform grows
 
 ```text
 src/
   core/
-    tasks/              # lifecycle, cancellation, bounded scheduling
-    monitoring/         # query model, dedupe, source limits, events
-    sites/              # adapter protocol and registry
-    notifications/      # consent-based Discord/Telegram/email/SMS sinks
-    storage/            # repository interfaces and migrations
-    telemetry/          # metrics, traces, structured logs
+    monitor_engine.py
+    request_engine.py
+    site_registry.py
+    storage.py
+    notifications.py
+    analytics.py                 # planned: queryable time-series/reporting
+  shared/
+    models.py
+    config.py                    # planned: versioned config schema
+    policies.py                  # planned: per-source budget/retention rules
   sites/
     supreme/
-    kith/
+      adapter.py                 # implemented
+    kith/                         # future, authorized source required
     nike/
     snkrs/
-    adidas_confirmed/
-    ...                 # add only with an authorized source/integration
-  shared/
-    models/
-    policies/           # retention, rate limits, data minimization
-  ui/
+    adidas/
+    palace/
+    stussy/
+    new_balance/
+    concepts/
+    bodega/
+    union/
+    undefeated/
+  api/                            # future authenticated API
+  ui/                             # future React dashboard
 tests/
 docs/
 ```
 
-The named retailers can be represented as future adapter slots: Supreme, Kith, Nike, SNKRS, Adidas Confirmed, Palace, Stussy, New Balance, Concepts, Bodega, Undefeated, DSM, A Ma Maniere, Feature, Atmos, Extra Butter, Shoe Palace, BSTN, Union LA, Fear of God, and Travis Scott Shop. This is a roadmap list, **not** a claim that each has an available or authorized API/feed.
+Parsing remains site-owned unless multiple adapters demonstrably share a
+stable format. Keep retailer-specific assumptions out of the core.
 
-### Code example: read-only adapter contract
+## Storage recommendation
 
-This is an illustrative boundary, not a working connector. It intentionally has no login, cart, payment, checkout, CAPTCHA solver, stealth, or proxy-rotation methods.
+- **SQLite (implemented):** local single-process development, product state,
+  observations, change events, and pending notifications. Add schema migrations,
+  retention, and backup/restore tests before treating the database as
+  operationally durable.
+- **PostgreSQL (next for shared service):** authoritative product/event/task
+  storage when multiple workers or users need shared transactional state.
+  Add versioned migrations, indexes, retention, access control, and backups.
+- **Redis (later, optional):** ephemeral queue coordination, short-lived
+  deduplication keys, and rate-limit counters only when a measured workload
+  requires it. Do not make it the sole record of product history.
 
-```python
-from dataclasses import dataclass
-from typing import Protocol, Sequence
+Do not store payment data, browser cookies, or unnecessary personal data in
+any of these stores.
 
+## Notification improvements
 
-@dataclass(frozen=True)
-class MonitorQuery:
-    keywords: tuple[str, ...] = ()
-    product_ids: tuple[str, ...] = ()
+Implemented environment variables:
 
+| Provider | Required variables |
+|---|---|
+| Discord | `DISCORD_WEBHOOK_URL` |
+| Telegram | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
+| Email | `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO`; optional `SMTP_PORT` (587 default), `SMTP_USERNAME`, `SMTP_PASSWORD` |
 
-@dataclass(frozen=True)
-class ProductObservation:
-    site: str
-    product_id: str
-    title: str
-    url: str
-    available: bool
-    observed_at: str
+Messages include product title, site, price/availability when known, product
+URL, and image when available. Telegram credentials must be configured as a
+pair; SMTP credentials must be configured as a pair. Notification sends are
+explicitly opt-in. The remaining reliability step is per-sink outbox tracking
+and bounded retry/backoff.
 
+## Future React dashboard and scale-up roadmap
 
-class RetailSite(Protocol):
-    site_id: str
+```text
+React dashboard
+      |
+Authenticated API + authorization/audit
+      |
+PostgreSQL <----> task and analytics services
+      |
+Bounded monitor workers ----> retailer plugins ----> approved feeds/APIs
+      |                              |
+      +----> event outbox ----------+----> notification providers
 
-    async def initialize(self) -> None: ...
-
-    async def discover(
-        self, query: MonitorQuery
-    ) -> Sequence[ProductObservation]: ...
-
-    async def shutdown(self) -> None: ...
+Optional Redis: ephemeral queue/cache/rate-limit coordination only
 ```
 
-Every concrete adapter should declare its source, allowed request budget, data-retention behavior, and failure policy. Unknown or blocked responses should stop or back off; they should not trigger evasive retries.
+The API should own user/task configuration and enforce tenant access. Workers
+should use the same plugin and observation contracts as the current CLI. Never
+allow a dashboard user to supply arbitrary request hosts; adapter source
+allowlists and published request budgets remain server-controlled.
 
-## 10. Monitoring, checkout, browser, challenge, and proxy recommendations
+### Phase 1 — source quality and operations
 
-### Monitoring
+1. Choose one retailer with documented permitted access and implement a
+   fixture-tested adapter; do not activate unverified targets.
+2. Add source-specific request budgets, conditional requests where supported,
+   schema/version checks, and adapter health metrics.
+3. Add SQLite schema migrations, retention, duplicate/outbox delivery tests,
+   and a CLI analytics report.
 
-- Normalize product observations into a shared model and emit append-only events (`discovered`, `availability_changed`, `source_error`).
-- Support product/variant/keyword filters only when the permitted source exposes those fields.
-- Deduplicate by `(site, product_id, variant_id, state)` and make event handling idempotent.
-- Add bounded polling intervals, conditional requests where supported, jitter only for load distribution within the source's allowed policy, and exponential backoff on errors.
-- Do not infer support for shock drops, private feeds, or site maps without explicit authorization.
+### Phase 2 — shared monitoring service
 
-### Checkout
+1. Add a backend API around the same monitor/storage interfaces.
+2. Move shared state to PostgreSQL; add a bounded worker queue only when
+   measured volume requires it.
+3. Add authentication, authorization, audit logging, per-user notification
+   preferences, and explicit data-retention controls.
+4. Add Redis only for measured ephemeral coordination/cache needs.
 
-No shared automated checkout engine is recommended. Retailer purchase flows vary, handle payment data, and can involve access controls. Keep the platform read-only and direct the user to the official product page for checkout. If a business later obtains a retailer-approved purchasing integration, review its contract and security model separately; do not put card data in this application.
+### Phase 3 — React UI
 
-### Browser/session
+Build a React frontend for monitor configuration, product history, release and
+inventory reports, analytics, source health, and notification preferences.
+The UI should call the authenticated API; it should not access retailer
+credentials or retailer sources directly. Checkout, payment, and purchasing
+remain out of scope.
 
-The current monitor uses Selenium only to load and inspect one listing page. Prefer documented feeds/APIs where they are permitted and available. Do not tamper with fingerprints or persist retailer session cookies in a shared worker. Any future browser component should be isolated, resource-limited, observable, and disabled by default.
+## Current scorecard
 
-### CAPTCHA/challenges
+| Area | Score | Main blocker |
+|---|---:|---|
+| Architecture | 5/10 | Reusable core exists, but only one adapter and no service/API boundary |
+| Maintainability | 6/10 | Models/tests exist; no package metadata, CI, config schema version, or DB migrations |
+| Performance | 4/10 | Single browser startup per run; no source cache or measured workload |
+| Scalability | 3/10 | SQLite and synchronous execution are local/single-process |
+| Reliability | 5/10 | Cleanup and outbox exist; no scheduler, per-sink delivery receipts, or live adapter tests |
+| Security | 7/10 | Read-only and no payment data; still needs dependency scanning, deployment controls, and source review |
+| Extensibility | 5/10 | Plugin interface exists; only Supreme is implemented |
+| Modernity | 5/10 | Typed Python modules and tests; no API, UI, CI, or operational telemetry |
 
-There is no current CAPTCHA implementation. For a safe design, detect challenge responses, stop the task, emit a challenge event, and offer a user-directed path to the retailer. Do not build interchangeable CAPTCHA solvers or automatic challenge bypass.
-
-### Proxies
-
-The `proxies` setting is unused. Do not add proxy rotation to bypass restrictions or rate limits. If a legitimate deployment needs network egress controls, use approved corporate egress, document it, and enforce source-specific budgets and circuit breakers.
-
-## 11. Account, profile, storage, analytics, and notifications
-
-### Accounts and profiles
-
-There is no account/session system. Do not expand the current billing JSON into an account vault. Keep account identity outside the monitor where possible; use the retailer's own authentication and checkout flows. If non-payment profile data is required for a permitted integration, define purpose, access control, encryption, retention, and deletion before implementation.
-
-### Storage recommendation
-
-| Store | Recommended use | Avoid |
-|---|---|---|
-| SQLite | Local single-user prototype: non-sensitive task definitions, source settings, and small discovery history | Card data, CVV, shared multi-worker coordination |
-| PostgreSQL | Shared durable tasks, normalized events/results, adapter configuration, migrations, audit trail | Unnecessary secrets or unbounded raw response retention |
-| Redis | Ephemeral queue coordination, short-lived dedupe/cache keys, rate-limit counters with TTL | Sole source of truth, long-lived PII/payment storage |
-
-Start with SQLite only for a local read-only prototype; move to PostgreSQL when concurrent workers or shared users are an actual requirement. Add Redis only for a measured queue/cache use case.
-
-### Analytics dashboard
-
-Track task totals and outcomes (started, discovered, failed, timed out, cancelled), source latency/error rates, queue age, dedupe counts, notification delivery, and resource use. If checkout is deliberately outside the service, do not report carts or conversions as platform metrics. Show per-source budgets and stop conditions. Apply retention and access control to event detail.
-
-### Notifications
-
-Define a `NotificationSink` interface and adapters for Discord, Telegram, email, and SMS only after user opt-in and credential storage are designed. Include task/source/status/time and a product URL; never include card data, CVV, session cookies, or full addresses. Use bounded retries, delivery idempotency, and redacted logs.
-
-## 12. Migration plan and priority list
-
-### Phase 0 — contain risk (substantially complete)
-
-1. [x] Removed unattended checkout and payment-data handling from the runtime.
-2. [x] Removed anti-detection modifications and proxy configuration.
-3. [x] Added validated, safe-default configuration and a dependency manifest. A fully locked dependency set remains outstanding.
-4. [x] Ensure browser cleanup with `try/finally`; the remaining browser flow is one-shot and read-only.
-
-### Phase 1 — establish the core
-
-1. Create shared product/query/event models and a typed `RetailSite` protocol.
-2. Add a registry that rejects duplicate site IDs and validates adapter capabilities.
-3. Implement a fake in-memory adapter and unit tests; do not connect to retailer endpoints yet.
-4. Add structured logging, cancellation, bounded execution, and a small error taxonomy.
-
-### Phase 2 — first authorized monitor
-
-1. Select one retailer with a documented, permitted source.
-2. Implement read-only discovery, source-specific rate limits, conditional requests, and result deduplication.
-3. Add retention controls, integration tests against fixtures, and monitoring metrics.
-4. Keep unsupported sites explicitly disabled.
-
-### Phase 3 — operations and expansion
-
-1. Add opt-in notification sinks and a small task UI/CLI.
-2. Add PostgreSQL only when shared persistence is needed; Redis only when measured queue/cache load warrants it.
-3. Add adapters one at a time after source permissions, data shape, limits, and failure behavior are documented.
-4. Review privacy, dependency updates, and operational metrics before each release.
-
-### Priority improvement list
-
-**Completed P0:** removed payment/CVV handling, unattended submission, stealth behavior, and proxy settings; unsupported config is rejected.
-
-**Remaining P1:** dependency lock, package metadata/CI, structured monitoring outcomes, and browser lifecycle tests.
-
-**P2:** adapter contract, authorized-source monitoring engine, source-specific rate limits/deduplication, and health metrics.
-
-**P3:** durable storage, UI, consent-based notifications, and multi-worker scaling—only after an authorized use case and measured need.
-
-## 13. Current scorecard after remediation
-
-Scores assess the repository **after the monitor-only remediation**, not the proposed target. A score of 1 means little or no platform capability is present; 10 requires production-grade design and evidence, not just scaffolding.
-
-| Category | Score | What prevents 10/10 | Steps toward 10 |
-|---|---:|---|---|
-| Architecture | 2/10 | Checkout responsibilities were removed, but the monitor remains a single-site script without adapter boundaries | Separate monitoring contracts and authorized source adapters; add persistence/UI only when needed |
-| Maintainability | 4/10 | Typed config and focused tests exist, but selectors remain hard-coded and there is no package metadata or CI | Add package layout, dependency lock, CI, and adapter contract tests |
-| Performance | 3/10 | One-shot page scan avoids retry loops and redundant sleeps, but still launches a browser and has no measurements or cache | Prefer documented feeds where available; measure before tuning; add dedupe/conditional fetch only for authorized sources |
-| Scalability | 1/10 | No queue, task isolation, durable state, or worker model | Introduce bounded task execution and durable event/task state only when required |
-| Reliability | 4/10 | Config validation and guaranteed cleanup are implemented, but no source integration tests, retry policy, cancellation, or durable state exist | Add deterministic adapter tests, explicit task states, bounded backoff, and operational health checks |
-| Security | 6/10 | Payment collection, automatic submission, and stealth behavior are removed; dependency locking and an external integration review remain | Lock and scan dependencies; minimize data; review each authorized source and deployment before adding it |
-| Extensibility | 2/10 | The current monitor remains Supreme-specific and has no plugin registry | Adopt an adapter protocol/registry and versioned capability contracts; add authorized adapters individually |
-| Modernity | 4/10 | Standard-library typing, tests, and a dependency declaration now exist, but there is no package layout, CI, or observability | Add packaging, CI, structured telemetry, and release process; use async only if measured workload justifies it |
-
-## Audit limitations
-
-This is a complete review of the **tracked repository contents**, which currently consist of one Python source file. There are no hidden services, dependency manifests, external configuration files, deployed runtime, or test suite available here to inspect. No retailer endpoints were contacted; no competitor feature claims were independently checked; no load test, penetration test, or runtime browser test was performed.
+Scores are for the current prototype, not a production deployment. Raising them
+requires authorized source integrations, operational tests, migrations,
+monitoring, and a reviewed deployment model.

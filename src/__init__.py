@@ -1,0 +1,1 @@
+"""Retail monitoring platform package."""
